@@ -28,6 +28,8 @@ const INGESTOR_ALLOWED_FIELDS = new Set([
 beforeEach(() => {
   (globalThis as any).navigator = {
     language: 'en-US',
+    languages: ['en-US', 'en'],
+    maxTouchPoints: 0,
     platform: 'MacIntel',
     cookieEnabled: true,
     doNotTrack: '0',
@@ -47,10 +49,15 @@ beforeEach(() => {
       resolvedOptions: () => ({ timeZone: 'America/New_York' }),
     }),
   };
+  (globalThis as any).location = {
+    href: 'https://app.example.com/dashboard?page=1',
+  };
   (globalThis as any).document = {
     createElement: () => ({
       getContext: () => null,
     }),
+    referrer: 'https://google.com',
+    title: 'Test Page',
   };
   (globalThis as any).btoa = (str: string) => Buffer.from(str).toString('base64');
 });

@@ -8,6 +8,8 @@ import assert from 'node:assert';
 beforeEach(() => {
   (globalThis as any).navigator = {
     language: 'en-US',
+    languages: ['en-US', 'en'],
+    maxTouchPoints: 0,
     platform: 'MacIntel',
     cookieEnabled: true,
     doNotTrack: '0',
@@ -27,12 +29,17 @@ beforeEach(() => {
       resolvedOptions: () => ({ timeZone: 'America/New_York' }),
     }),
   };
+  (globalThis as any).location = {
+    href: 'https://app.example.com/dashboard?page=1',
+  };
   // Stub document.createElement so getGpuRenderer() returns undefined
   // without throwing.
   (globalThis as any).document = {
     createElement: () => ({
       getContext: () => null,
     }),
+    referrer: 'https://google.com',
+    title: 'My Dashboard',
   };
   // Stub btoa for base64 encoding used internally by the SDK.
   (globalThis as any).btoa = (str: string) => Buffer.from(str).toString('base64');
@@ -63,6 +70,8 @@ describe('SOCWardenBrowser', () => {
 
     assert.strictEqual(ctx.timezone, 'America/New_York');
     assert.strictEqual(ctx.language, 'en-US');
+    assert.deepStrictEqual(ctx.languages, ['en-US', 'en']);
+    assert.strictEqual(ctx.touch, false);
     assert.strictEqual(ctx.platform, 'MacIntel');
     assert.strictEqual(ctx.screen, '1920x1080');
     assert.strictEqual(ctx.viewport, '1440x900');
@@ -70,6 +79,9 @@ describe('SOCWardenBrowser', () => {
     assert.strictEqual(ctx.cookie_enabled, true);
     assert.strictEqual(ctx.do_not_track, false);
     assert.strictEqual(ctx.cpu_cores, 8);
+    assert.strictEqual(ctx.page_url, 'https://app.example.com/dashboard?page=1');
+    assert.strictEqual(ctx.page_referrer, 'https://google.com');
+    assert.strictEqual(ctx.page_title, 'My Dashboard');
   });
 
   it('direct mode payload has correct shape', async () => {
@@ -107,20 +119,14 @@ describe('SOCWardenBrowser', () => {
     assert.ok(body.timestamp, 'body should include timestamp');
   });
 
-  it('relay mode throws on track()', async () => {
+  it('relay mode track() warns and returns without throwing', async () => {
     const { SOCWardenBrowser } = await loadSDK();
     const sdk = new SOCWardenBrowser({ mode: 'relay' });
 
-    await assert.rejects(
-      () => sdk.track('test.event', {}),
-      (err: Error) => {
-        assert.ok(
-          err.message.includes('track() is only available in direct mode'),
-          `unexpected error message: ${err.message}`,
-        );
-        return true;
-      },
-    );
+    // track() should resolve silently (no throw) in relay mode
+    await sdk.track('test.event', {});
+    // If we get here, it didn't throw — which is the desired behavior
+    assert.ok(true, 'track() did not throw in relay mode');
   });
 
   it('config validation — direct mode without apiKey throws', async () => {
@@ -151,5 +157,29 @@ describe('SOCWardenBrowser', () => {
         return true;
       },
     );
+  });
+
+  // IP validation note: the browser SDK's track() accepts only `event` and
+  // `metadata` — there is no user-supplied `ip` parameter. The payload never
+  // contains a top-level `ip` field, so no sanitization is needed here.
+  it('direct mode payload never contains a top-level ip field', async () => {
+    const { SOCWardenBrowser } = await loadSDK();
+
+    let capturedBody: any = null;
+    (globalThis as any).fetch = async (_url: string, init: any) => {
+      capturedBody = JSON.parse(init.body);
+      return { ok: true, status: 202 };
+    };
+
+    const sdk = new SOCWardenBrowser({
+      mode: 'direct',
+      apiKey: 'sk_test_abc',
+      endpoint: 'https://ingest.example.com',
+    });
+
+    await sdk.track('auth.login.success', { role: 'admin' });
+
+    assert.ok(capturedBody !== null, 'fetch should have been called');
+    assert.ok(!('ip' in capturedBody), 'payload must not contain a top-level ip field');
   });
 });

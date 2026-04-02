@@ -26,6 +26,8 @@ export interface SOCWardenBrowserConfig {
 export interface ClientContext {
   timezone: string;
   language: string;
+  languages: string[];
+  touch: boolean;
   platform: string;
   screen: string;
   viewport: string;
@@ -37,6 +39,9 @@ export interface ClientContext {
   gpu_renderer: string | undefined;
   device_memory: number | undefined;
   cpu_cores: number | undefined;
+  page_url: string;
+  page_referrer: string;
+  page_title: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -59,10 +64,27 @@ function getGpuRenderer(): string | undefined {
   return undefined;
 }
 
+function stripSensitiveParams(url: string): string {
+  try {
+    const u = new URL(url);
+    const sensitive = ['token', 'key', 'password', 'secret', 'code', 'api_key', 'apikey', 'access_token', 'refresh_token'];
+    for (const param of sensitive) {
+      if (u.searchParams.has(param)) {
+        u.searchParams.set(param, '[REDACTED]');
+      }
+    }
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 function collectContext(): ClientContext {
   return {
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     language: navigator.language,
+    languages: Array.from(navigator.languages || [navigator.language]),
+    touch: navigator.maxTouchPoints > 0,
     platform: navigator.platform,
     screen: `${screen.width}x${screen.height}`,
     viewport: `${window.innerWidth}x${window.innerHeight}`,
@@ -74,6 +96,9 @@ function collectContext(): ClientContext {
     gpu_renderer: getGpuRenderer(),
     device_memory: (navigator as any).deviceMemory,
     cpu_cores: navigator.hardwareConcurrency,
+    page_url: stripSensitiveParams(location.href),
+    page_referrer: document.referrer,
+    page_title: document.title,
   };
 }
 
@@ -90,6 +115,8 @@ export class SOCWardenBrowser {
   private readonly headerName: string;
   private ctx: ClientContext;
   private encoded: string;
+  private _backedOff = false;
+  private _backoffTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(config: SOCWardenBrowserConfig) {
     if (config.mode === 'direct') {
@@ -161,37 +188,68 @@ export class SOCWardenBrowser {
 
   /**
    * Direct mode — POST an event to the SOCWarden ingestor.
+   * Never throws — errors are silently logged via console.warn.
    *
    * @param event  Event type, e.g. "auth.login.success"
    * @param metadata  Arbitrary key-value metadata to attach
    */
   async track(event: string, metadata?: Record<string, any>): Promise<void> {
     if (this.config.mode !== 'direct') {
-      throw new Error('SOCWarden: track() is only available in direct mode');
+      console.warn('SOCWarden: track() is only available in direct mode');
+      return;
     }
 
-    const endpoint = this.config.endpoint!.replace(/\/+$/, '');
+    if (this._backedOff) {
+      console.warn('SOCWarden: rate-limited, skipping event');
+      return;
+    }
 
-    const body = {
-      event: event,
-      source: 'browser',
-      metadata: metadata ?? {},
-      context: this.ctx,
-      timestamp: new Date().toISOString(),
-    };
+    try {
+      const endpoint = this.config.endpoint!.replace(/\/+$/, '');
 
-    const res = await fetch(`${endpoint}/v1/events`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.config.apiKey}`,
-      },
-      body: JSON.stringify(body),
-      keepalive: true,
-    });
+      const body = {
+        event: event,
+        source: 'browser',
+        metadata: metadata ?? {},
+        context: this.ctx,
+        timestamp: new Date().toISOString(),
+      };
 
-    if (!res.ok && res.status !== 202) {
-      throw new Error(`SOCWarden: ingestor responded with ${res.status}`);
+      const res = await fetch(`${endpoint}/v1/events`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.config.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        keepalive: true,
+      });
+
+      if (res.status === 429) {
+        this._backedOff = true;
+        const retryAfter = res.headers?.get?.('Retry-After');
+        let delaySec = 60;
+        if (retryAfter) {
+          const parsed = parseInt(retryAfter, 10);
+          if (!isNaN(parsed) && parsed > 0) {
+            delaySec = Math.min(parsed, 300);
+          }
+        }
+        this._backoffTimer = setTimeout(() => {
+          this._backedOff = false;
+          this._backoffTimer = null;
+        }, delaySec * 1000);
+        console.warn(`SOCWarden: rate-limited, backing off for ${delaySec}s`);
+        return;
+      }
+
+      if (!res.ok && res.status !== 202) {
+        console.warn(`SOCWarden: ingestor responded with ${res.status}`);
+        return;
+      }
+    } catch (err) {
+      console.warn('SOCWarden: failed to send event', err);
+      return;
     }
   }
 }
