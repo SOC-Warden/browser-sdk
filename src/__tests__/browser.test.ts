@@ -59,12 +59,15 @@ async function loadSDK() {
 // ---------------------------------------------------------------------------
 
 describe('SOCWardenBrowser', () => {
-  it('collectContext returns all fields', async () => {
+  // D5 FIX: Test with consentLevel: 'full' to verify all fields are collected.
+  // Default 'basic' only collects non-fingerprinting fields (page URL, language, etc.).
+  it('collectContext returns all fields when consentLevel is full', async () => {
     const { SOCWardenBrowser } = await loadSDK();
     const sdk = new SOCWardenBrowser({
       mode: 'direct',
       apiKey: 'test-key',
       endpoint: 'https://ingest.example.com',
+      consentLevel: 'full', // D5 FIX: must opt in to collect fingerprinting data
     });
     const ctx = sdk.collectContext();
 
@@ -82,6 +85,34 @@ describe('SOCWardenBrowser', () => {
     assert.strictEqual(ctx.page_url, 'https://app.example.com/dashboard?page=1');
     assert.strictEqual(ctx.page_referrer, 'https://google.com');
     assert.strictEqual(ctx.page_title, 'My Dashboard');
+  });
+
+  // D5 FIX: Verify that default 'basic' consent does NOT collect fingerprinting data.
+  it('collectContext omits fingerprinting fields at default basic consent level', async () => {
+    const { SOCWardenBrowser } = await loadSDK();
+    const sdk = new SOCWardenBrowser({
+      mode: 'direct',
+      apiKey: 'test-key',
+      endpoint: 'https://ingest.example.com',
+      // no consentLevel — defaults to 'basic'
+    });
+    const ctx = sdk.collectContext();
+
+    // Basic context: page URL, language, timezone, viewport should be present
+    assert.strictEqual(ctx.timezone, 'America/New_York');
+    assert.strictEqual(ctx.language, 'en-US');
+    assert.strictEqual(ctx.viewport, '1440x900');
+    assert.strictEqual(ctx.page_url, 'https://app.example.com/dashboard?page=1');
+    assert.strictEqual(ctx.do_not_track, false);
+
+    // Fingerprinting fields MUST be absent at 'basic' consent level
+    assert.strictEqual(ctx.platform, '', 'platform should be empty at basic consent');
+    assert.strictEqual(ctx.screen, '', 'screen should be empty at basic consent');
+    assert.strictEqual(ctx.color_depth, 0, 'color_depth should be 0 at basic consent');
+    assert.strictEqual(ctx.cookie_enabled, false, 'cookie_enabled should be false at basic consent');
+    assert.strictEqual(ctx.cpu_cores, undefined, 'cpu_cores should be undefined at basic consent');
+    assert.strictEqual(ctx.gpu_renderer, undefined, 'gpu_renderer should be undefined at basic consent');
+    assert.strictEqual(ctx.device_memory, undefined, 'device_memory should be undefined at basic consent');
   });
 
   it('direct mode payload has correct shape', async () => {

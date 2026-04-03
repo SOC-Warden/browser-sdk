@@ -21,6 +21,17 @@ export interface SOCWardenBrowserConfig {
   endpoint?: string;
   /** Header name used in relay mode. Default: X-SOCWarden-Context */
   headerName?: string;
+  /**
+   * D5 FIX (GDPR): Controls how much device data is collected.
+   *
+   * - 'none'  — collect nothing (SDK is effectively disabled for context).
+   * - 'basic' — collect only page URL, referrer, browser language, viewport size.
+   *             No fingerprinting data. **Default.**
+   * - 'full'  — collect all data including WebGL GPU renderer, hardware
+   *             concurrency, device memory, and screen resolution.
+   *             Only use with explicit user consent.
+   */
+  consentLevel?: 'none' | 'basic' | 'full';
 }
 
 export interface ClientContext {
@@ -64,6 +75,9 @@ function getGpuRenderer(): string | undefined {
   return undefined;
 }
 
+// D3 FIX: Event type validation regex — matches the ingestor's required format.
+const EVENT_TYPE_REGEX = /^[a-z][a-z0-9]{0,29}(\.[a-z][a-z0-9_]{0,29}){1,3}$/;
+
 function stripSensitiveParams(url: string): string {
   try {
     const u = new URL(url);
@@ -79,26 +93,77 @@ function stripSensitiveParams(url: string): string {
   }
 }
 
-function collectContext(): ClientContext {
-  return {
+/**
+ * D5 FIX (GDPR): Collect context data according to the consent level.
+ *
+ * 'basic' (default): page URL, referrer, language, viewport — no fingerprinting.
+ * 'full': all fields including WebGL renderer, hardware concurrency, device memory.
+ */
+function collectContext(consentLevel: 'none' | 'basic' | 'full' = 'basic'): ClientContext {
+  // 'none' — return empty context (no data collection).
+  if (consentLevel === 'none') {
+    return {
+      timezone: '',
+      language: '',
+      languages: [],
+      touch: false,
+      platform: '',
+      screen: '',
+      viewport: '',
+      color_depth: 0,
+      cookie_enabled: false,
+      do_not_track: false,
+      connection_type: undefined,
+      downlink: undefined,
+      gpu_renderer: undefined,
+      device_memory: undefined,
+      cpu_cores: undefined,
+      page_url: '',
+      page_referrer: '',
+      page_title: '',
+    };
+  }
+
+  // 'basic': collect non-fingerprinting data only.
+  const basic: ClientContext = {
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     language: navigator.language,
     languages: Array.from(navigator.languages || [navigator.language]),
+    touch: false,
+    platform: '',
+    screen: '',
+    viewport: `${window.innerWidth}x${window.innerHeight}`,
+    color_depth: 0,
+    cookie_enabled: false,
+    do_not_track: navigator.doNotTrack === '1',
+    connection_type: undefined,
+    downlink: undefined,
+    // D5 FIX: fingerprinting fields omitted at 'basic' consent level.
+    gpu_renderer: undefined,
+    device_memory: undefined,
+    cpu_cores: undefined,
+    page_url: stripSensitiveParams(location.href),
+    page_referrer: document.referrer,
+    page_title: document.title,
+  };
+
+  if (consentLevel !== 'full') {
+    return basic;
+  }
+
+  // 'full': collect all fields including fingerprinting data (requires consent).
+  return {
+    ...basic,
     touch: navigator.maxTouchPoints > 0,
     platform: navigator.platform,
     screen: `${screen.width}x${screen.height}`,
-    viewport: `${window.innerWidth}x${window.innerHeight}`,
     color_depth: screen.colorDepth,
     cookie_enabled: navigator.cookieEnabled,
-    do_not_track: navigator.doNotTrack === '1',
     connection_type: (navigator as any).connection?.effectiveType,
     downlink: (navigator as any).connection?.downlink,
     gpu_renderer: getGpuRenderer(),
     device_memory: (navigator as any).deviceMemory,
     cpu_cores: navigator.hardwareConcurrency,
-    page_url: stripSensitiveParams(location.href),
-    page_referrer: document.referrer,
-    page_title: document.title,
   };
 }
 
@@ -122,11 +187,24 @@ export class SOCWardenBrowser {
     if (config.mode === 'direct') {
       if (!config.apiKey) throw new Error('SOCWarden: apiKey is required in direct mode');
       if (!config.endpoint) throw new Error('SOCWarden: endpoint is required in direct mode');
+
+      // D2 FIX: Enforce HTTPS to prevent API key transmission in cleartext.
+      if (config.endpoint && !config.endpoint.startsWith('https://')) {
+        // In browsers there is no "NODE_ENV production" equivalent; always warn.
+        // Throw in non-localhost contexts where cleartext is dangerous.
+        const isLocalhost = config.endpoint.startsWith('http://localhost') ||
+          config.endpoint.startsWith('http://127.0.0.1');
+        if (!isLocalhost) {
+          throw new Error('SOCWarden: endpoint must use HTTPS. API keys must not be transmitted in cleartext.');
+        }
+        console.warn('[SOCWarden] WARNING: Endpoint is using HTTP. API keys will be transmitted in cleartext.');
+      }
     }
 
     this.config = config;
     this.headerName = config.headerName ?? 'X-SOCWarden-Context';
-    this.ctx = collectContext();
+    // D5 FIX: Default consentLevel is 'basic' — no fingerprinting without consent.
+    this.ctx = collectContext(config.consentLevel ?? 'basic');
     this.encoded = encodeContext(this.ctx);
   }
 
@@ -134,9 +212,10 @@ export class SOCWardenBrowser {
   // Public API
   // -----------------------------------------------------------------------
 
-  /** Return the current client context snapshot. */
+  /** Return the current client context snapshot (respects configured consentLevel). */
   collectContext(): ClientContext {
-    this.ctx = collectContext();
+    // D5 FIX: Respect configured consentLevel when refreshing context.
+    this.ctx = collectContext(this.config.consentLevel ?? 'basic');
     this.encoded = encodeContext(this.ctx);
     return this.ctx;
   }
@@ -196,6 +275,13 @@ export class SOCWardenBrowser {
   async track(event: string, metadata?: Record<string, any>): Promise<void> {
     if (this.config.mode !== 'direct') {
       console.warn('SOCWarden: track() is only available in direct mode');
+      return;
+    }
+
+    // D3 FIX: Validate event type format before sending.
+    if (!EVENT_TYPE_REGEX.test(event)) {
+      console.warn(`[SOCWarden] Invalid event type format, dropping event: "${event}". ` +
+        'Event types must match ^[a-z][a-z0-9]{0,29}(\\.[a-z][a-z0-9_]{0,29}){1,3}$');
       return;
     }
 
