@@ -38,7 +38,7 @@ import { SOCWardenBrowser } from '@socwarden/browser';
 const sw = new SOCWardenBrowser({
   mode: 'direct',
   apiKey: 'sw_live_xxxxxxxxxxxxxxxxxxxx',
-  endpoint: 'https://ingest.socwarden.io',
+  endpoint: 'https://ingest.socwarden.com',
 });
 
 await sw.track('auth.login.success', { user_id: '42' });
